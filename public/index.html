@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Tank Arena</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14181c; color: #eef1f4; font: 16px system-ui, sans-serif; overflow: hidden; overscroll-behavior: none; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  [hidden] { display: none !important; }
+  #ui { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(10, 12, 14, .82); padding: 16px; }
+  .card { width: 100%; max-width: 340px; background: #20262c; border: 1px solid #39424b; border-radius: 12px; padding: 20px; }
+  h1 { margin: 0 0 14px; font-size: 24px; }
+  label { display: block; margin: 12px 0 4px; font-size: 14px; color: #b6c0ca; }
+  input, button { font: inherit; width: 100%; box-sizing: border-box; padding: 11px 12px; border-radius: 8px; border: 1px solid #4a5560; background: #14181c; color: inherit; }
+  button { margin-top: 12px; background: #3e9bff; border-color: #3e9bff; color: #06121f; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  #code { text-transform: uppercase; letter-spacing: 4px; }
+  #err { color: #ff8a8e; min-height: 20px; margin: 10px 0 0; }
+  #roomCode { font-size: 30px; letter-spacing: 6px; font-weight: 700; margin: 4px 0 2px; }
+  ul { list-style: none; padding: 0; margin: 14px 0 0; }
+  li { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
+  .dot { width: 14px; height: 14px; border-radius: 3px; flex: none; }
+  .muted { color: #b6c0ca; font-size: 14px; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="ui">
+  <form id="menu" class="card">
+    <h1>Tank Arena</h1>
+    <label for="name">Your name</label>
+    <input id="name" maxlength="12" autocomplete="off">
+    <button type="button" id="create">Create room</button>
+    <label for="code">Room code</label>
+    <input id="code" maxlength="4" autocomplete="off" autocapitalize="characters">
+    <button type="submit" id="join">Join room</button>
+    <p id="err" role="alert"></p>
+  </form>
+
+  <div id="room" class="card" hidden>
+    <h1 id="title"></h1>
+    <div class="muted">Room code</div>
+    <div id="roomCode"></div>
+    <p class="muted">Friends open this page and enter the code.</p>
+    <ul id="list"></ul>
+    <button type="button" id="start"></button>
+    <p id="note" class="muted" role="status"></p>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+
+let ws, me = null, cfg = null, snap = null, view = {}, uiKey = '';
+let s = 1, ox = 0, oy = 0, dpr = 1;
+
+// ---------- connection ----------
+function connect(first) {
+  $('err').textContent = '';
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  ws.onopen = () => ws.send(JSON.stringify(first));
+  ws.onerror = () => { $('err').textContent = 'Could not connect'; };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.t === 'joined') { me = m.id; cfg = m; resize(); }
+    else if (m.t === 'err') { $('err').textContent = m.msg; ws.close(); }
+    else if (m.t === 's' && me !== null) { snap = m; updateUi(); }
+  };
+  ws.onclose = () => {
+    if (me === null) return;
+    me = null; snap = null; uiKey = '';
+    $('ui').hidden = false; $('room').hidden = true; $('menu').hidden = false;
+    $('err').textContent = 'Disconnected';
+  };
+}
+const myName = () => $('name').value;
+$('create').onclick = () => connect({ t: 'create', name: myName() });
+$('menu').onsubmit = e => { e.preventDefault(); connect({ t: 'join', code: $('code').value, name: myName() }); };
+$('start').onclick = () => ws.send(JSON.stringify({ t: 'start' }));
+
+// ---------- lobby / result panel ----------
+function updateUi() {
+  const key = JSON.stringify([snap.state, snap.host, snap.winner, snap.players.map(p => [p.id, p.name])]);
+  if (key === uiKey) return;
+  uiKey = key;
+  const playing = snap.state === 'playing';
+  if (playing) { view = {}; document.activeElement.blur(); }
+  $('ui').hidden = playing;
+  $('menu').hidden = true;
+  $('room').hidden = false;
+  $('title').textContent = snap.state === 'lobby' ? 'Lobby' : snap.winner ? snap.winner + ' wins' : 'Draw';
+  $('roomCode').textContent = cfg.code;
+  const list = $('list');
+  list.textContent = '';
+  for (const p of snap.players) {
+    const li = document.createElement('li'), dot = document.createElement('span');
+    dot.className = 'dot'; dot.style.background = p.color;
+    // textContent: names come from other players, never treat them as HTML
+    li.append(dot, p.name + (p.id === me ? ' (you)' : '') + (p.id === snap.host ? ' · host' : ''));
+    list.append(li);
+  }
+  const host = snap.host === me, enough = snap.players.length >= 2;
+  $('start').hidden = !host;
+  $('start').disabled = !enough;
+  $('start').textContent = snap.state === 'lobby' ? 'Start' : 'Rematch';
+  $('note').textContent = !enough ? 'Need at least 2 players.' : host ? '' : 'Waiting for the host to start.';
+}
+
+// ---------- input ----------
+const keys = {}, mouse = { x: 0, y: 0, down: false }, sticks = { L: null, R: null };
+let aim = 0, touch = false;
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; });
+cv.addEventListener('mousemove', e => { touch = false; mouse.x = e.clientX; mouse.y = e.clientY; });
+cv.addEventListener('mousedown', () => { mouse.down = true; });
+addEventListener('mouseup', () => { mouse.down = false; });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+cv.addEventListener('touchstart', e => {
+  e.preventDefault(); touch = true;
+  for (const t of e.changedTouches) {
+    const side = t.clientX < innerWidth / 2 ? 'L' : 'R';
+    if (!sticks[side]) sticks[side] = { id: t.identifier, x0: t.clientX, y0: t.clientY, x: t.clientX, y: t.clientY };
+  }
+}, { passive: false });
+cv.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) for (const k of ['L', 'R']) {
+    if (sticks[k] && sticks[k].id === t.identifier) { sticks[k].x = t.clientX; sticks[k].y = t.clientY; }
+  }
+}, { passive: false });
+function touchEnd(e) {
+  for (const t of e.changedTouches) for (const k of ['L', 'R']) if (sticks[k] && sticks[k].id === t.identifier) sticks[k] = null;
+}
+cv.addEventListener('touchend', touchEnd);
+cv.addEventListener('touchcancel', touchEnd);
+
+const STICK = 50; // px of drag for full speed
+setInterval(() => {
+  if (!snap || snap.state !== 'playing' || ws.readyState !== 1) return;
+  let mx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  let my = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+  let fire = mouse.down || !!keys.Space;
+  const L = sticks.L, R = sticks.R;
+  if (L) { mx = (L.x - L.x0) / STICK; my = (L.y - L.y0) / STICK; }
+  if (R) {
+    const dx = R.x - R.x0, dy = R.y - R.y0;
+    if (Math.hypot(dx, dy) > 10) aim = Math.atan2(dy, dx);
+    fire = true;
+  } else if (!touch) {
+    const v = view[me];
+    if (v) aim = Math.atan2((mouse.y - oy) / s - v.y, (mouse.x - ox) / s - v.x);
+  }
+  ws.send(JSON.stringify({ t: 'in', mx, my, aim, fire }));
+}, 33);
+
+// ---------- drawing ----------
+function resize() {
+  dpr = devicePixelRatio || 1;
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+  if (!cfg) return;
+  s = Math.min(innerWidth / cfg.C.W, innerHeight / cfg.C.H);
+  ox = (innerWidth - cfg.C.W * s) / 2; oy = (innerHeight - cfg.C.H * s) / 2;
+}
+addEventListener('resize', resize);
+resize();
+
+function draw() {
+  requestAnimationFrame(draw);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#14181c';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!snap || !cfg) return;
+  const C = cfg.C;
+
+  ctx.setTransform(s * dpr, 0, 0, s * dpr, ox * dpr, oy * dpr);
+  ctx.fillStyle = '#2b3138'; ctx.fillRect(0, 0, C.W, C.H);
+  ctx.fillStyle = '#6b7783';
+  for (const w of cfg.walls) ctx.fillRect(w.x, w.y, w.w, w.h);
+
+  cfg.pickups.forEach(([x, y], i) => {
+    if (!snap.pickups[i]) return;
+    ctx.fillStyle = '#46c66b';
+    ctx.beginPath(); ctx.arc(x, y, C.PICKUP_R, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.fillRect(x - 8, y - 2, 16, 4); ctx.fillRect(x - 2, y - 8, 4, 16);
+  });
+
+  ctx.fillStyle = '#ffe27a';
+  for (const [x, y] of snap.bullets) { ctx.beginPath(); ctx.arc(x, y, C.BR, 0, 7); ctx.fill(); }
+
+  ctx.textAlign = 'center';
+  for (const p of snap.players) {
+    if (!p.alive) continue;
+    // ease toward the server position: hides the 30 Hz steps
+    const v = view[p.id] ??= { x: p.x, y: p.y };
+    v.x += (p.x - v.x) * .35; v.y += (p.y - v.y) * .35;
+    ctx.save();
+    ctx.translate(v.x, v.y);
+    ctx.save(); ctx.rotate(p.body);
+    ctx.fillStyle = p.color; ctx.fillRect(-C.R, -17, C.R * 2, 34);
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(-C.R, -17, C.R * 2, 6); ctx.fillRect(-C.R, 11, C.R * 2, 6);
+    ctx.restore();
+    ctx.save(); ctx.rotate(p.aim);
+    ctx.fillStyle = '#11151a'; ctx.fillRect(0, -4, 32, 8);
+    ctx.beginPath(); ctx.arc(0, 0, 11, 0, 7); ctx.fill();
+    ctx.restore();
+    if (p.id === me) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, C.R + 8, 0, 7); ctx.stroke(); }
+    ctx.fillStyle = '#11151a'; ctx.fillRect(-24, -44, 48, 7);
+    ctx.fillStyle = p.hp > 40 ? '#46c66b' : '#e5484d'; ctx.fillRect(-23, -43, 46 * p.hp / C.HP, 5);
+    ctx.fillStyle = '#eef1f4'; ctx.font = '600 16px system-ui, sans-serif';
+    ctx.fillText(p.name, 0, -50);
+    ctx.restore();
+  }
+
+  if (snap.state === 'playing') {
+    ctx.fillStyle = '#eef1f4'; ctx.font = '700 30px system-ui, sans-serif';
+    ctx.fillText(Math.floor(snap.time / 60) + ':' + String(snap.time % 60).padStart(2, '0'), C.W / 2, 40);
+    const mine = snap.players.find(p => p.id === me);
+    if (mine && !mine.alive) { ctx.font = '600 26px system-ui, sans-serif'; ctx.fillText('Watching until the next round', C.W / 2, C.H - 24); }
+  }
+
+  // touch sticks, in screen pixels
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  for (const k of ['L', 'R']) {
+    const t = sticks[k];
+    if (!t) continue;
+    ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(t.x0, t.y0, STICK, 0, 7); ctx.stroke();
+    const dx = t.x - t.x0, dy = t.y - t.y0, d = Math.max(1, Math.hypot(dx, dy) / STICK);
+    ctx.fillStyle = 'rgba(255,255,255,.35)';
+    ctx.beginPath(); ctx.arc(t.x0 + dx / d, t.y0 + dy / d, 22, 0, 7); ctx.fill();
+  }
+}
+draw();
+</script>
+</body>
+</html>

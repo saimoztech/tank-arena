@@ -1,0 +1,12 @@
+{
+  "name": "tank-arena",
+  "private": true,
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test.js"
+  },
+  "dependencies": {
+    "ws": "^8"
+  }
+}
